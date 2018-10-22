@@ -1,0 +1,398 @@
+# set work directory
+setwd("C://Users/ruyug/Desktop")
+list.files()
+
+# read data
+train_raw <- read.csv("train_2016_v2.csv", stringsAsFactors = FALSE)
+property <- read.csv("properties_2016.csv", stringsAsFactors = FALSE)
+
+# Understand the data by observing:
+summary(train_raw)
+str(train_raw)
+dim(train_raw)
+head(train_raw)
+
+str(property)
+summary(property)
+head(property)
+
+length(unique(train_raw$parcelid))
+length(unique(property$parcelid))
+
+#join two data sets by parcelid:
+train <- merge(train_raw, property, by = "parcelid")
+dim(train)
+summary(train)
+write.csv(train, 'train_property_20180804.csv')
+
+##################################################################################################
+####################### Dealing with missing values  #############################################
+##################################################################################################
+
+# check how many NAs in each feature. 
+#Firstly write a function to check for one column
+count_na <- function(x){length(which(is.na(x)))}
+
+#Applying the function to all columns:
+MissingCount <- data.frame(apply(train, 2, count_na))
+MissingCount$MissingPercent <- round(MissingCount[,1]/nrow(train),2)
+MissingCount[order(MissingCount$MissingPercent, decreasing = T), ]
+
+#Excluding the features that have too many missing values
+KeepCol <- rownames(MissingCount[MissingCount$MissingPercent <= 0.1,])
+
+train_sub <- train[, KeepCol]
+dim(train_sub)
+
+# there are some features in wrong data type
+# for example, the program may think regionidcounty is a numeric feature, but in fact we should treat it as categorical
+str(train_sub)
+#coerce the feaures into right data type
+char_cols = c('fips', 
+		 'propertylandusetypeid', 
+		 'rawcensustractandblock', 
+		 'regionidcounty', 
+		 'assessmentyear', 
+		 'regionidzip', 
+		 'censustractandblock', 
+		 'regionidcity')  
+train_sub[,char_cols] <- apply(train_sub[,char_cols], 2, function(x) as.character(x))
+
+train_sub$taxdelinquencyflag <- ifelse(train_sub$taxdelinquencyflag != "", TRUE, FALSE)
+bool_cols <- c("hashottuborspa", "fireplaceflag")
+train_sub[,bool_cols] <- apply(train_sub[,bool_cols], 2, function(x) as.logical(x))
+str(train_sub)
+
+# how to treat missing values
+	# (1) Remove features with too many missing value, 
+	# (2) for categorical features, add new level to represent NA  
+	# (3) imputation. 
+	# library(mice)
+	# there are different ways to impute missing values, the commonly used ones are:
+	# for numerical features, impute by average, median, or 0 (choice based on domain knowledge)
+		beMedian <- function(x){ifelse(is.na(x), median(x, na.rm = T), x)}
+		beMean <- function(x){ifelse(is.na(x), mean(x, na.rm = T), x)}
+		beZero <- function(x){ifelse(is.na(x), 0, x)}
+	# for categorical features, impute by mode (the biggest category), or create a new category "Unknown"
+		beUnknown <- function(x){ifelse(is.na(x), "Unknown", x)}	
+		beMode <- function (x) {
+				  xtab <- table(x)
+				  ifelse(is.na(x), names(which(xtab == max(xtab))), x)
+				  }
+	# for boolean features
+		beOpposite <- function(x){ifelse(is.na(x), FALSE, x)}
+		
+	# there are also model based imputations, some libraries can help: 
+		# "mice" package
+		# for example: random forest missing value imputation. Intuition: started by replacing NAs by mean,
+		# then iteratively run random forest --> compute proximity matrix --> use it as weight to update imputation
+		# until OOB is larger than last iteration
+		library(mice)
+		methods(mice)
+		train_imputed <- complete(mice(train_sub, 
+                           defaultMethod=c('rf')))
+
+		
+	#simple imputation vs model based imputation
+		#the simple method replies more on domain knowledge, and involves more steps
+		#the model based method is easier to implement, but sometimes ignores the common sense. 
+			#for example, if missing value is because of lack of knowledge, 
+			#it needs to be imputed by new category "Unknown", 
+			#imputing by known categories is not a good idea.
+		# the model output will tell which way is more suitable for this scenario
+	
+sapply(train, class)
+	
+missing_impute <- function(dataframe){
+col_class <- sapply(dataframe, class)
+col_num <- names(col_class[col_class %in% c("numeric", "integer")])
+col_cat <- names(col_class[col_class %in% c("character", "factor")])
+col_log <- names(col_class[col_class %in% c("logical")])
+#length(c(col_num, col_cat, col_log))
+dataframe[, col_num] <- apply(dataframe[, col_num], 2, beMedian)
+dataframe[, col_cat] <- apply(dataframe[, col_cat], 2, beMode)
+dataframe[, col_log] <- apply(dataframe[, col_log], 2, beOpposite)
+return(cbind(dataframe[, col_num], dataframe[, col_cat], dataframe[, col_log]))
+#colSums(sapply(train_sub, is.na))
+#colSums(sapply(dataframe, is.na))
+}
+
+train_imputed <- missing_impute(train_sub)
+train_imputed[is.na(train_imputed)]
+
+# Exploratory data analysis:
+# numeric variables v.s. categorical variables
+################ numeric variables
+mean(train_sub$logerror)
+sd(train_sub$logerror)
+median(train_sub$logerror)
+quantile(train_sub$logerror, c(0.1, 0.25, 0.5, 0.75, 0.9))
+summary(train_sub$logerror)
+plot(density(train_sub$logerror)) #kernel smoothing
+#hist(train_sub$logerror)
+
+
+###################### numerical var with output (correlation)
+library(corrplot)
+# if there is missing value in the data, correlation algorithm will not work, so we do that only on complete cases 
+correlations <- cor(train_sub[, c('logerror', 'bathroomcnt', 'bedroomcnt', 'roomcnt',
+                              'taxamount', 'structuretaxvaluedollarcnt', 'calculatedfinishedsquarefeet',
+                              'calculatedbathnbr', 'fullbathcnt', 'finishedsquarefeet12', 'lotsizesquarefeet')], 
+                    use = "complete.obs")
+
+corrplot(correlations)
+corrplot(correlations, method = "square", type = 'upper')
+?corrplot
+# we can findout two things from correlation plot
+# (1) is there any input features highly correalted with output variable?
+# (2) multicollinearity
+
+################ categorical variables, transactiondate for example
+table(train_sub$transactiondate)
+barplot(table(train_sub$transactiondate))
+
+# from the barplot, we see the transaction volume from Sep to Dec is lower. Consider transform date into month
+train_sub$txnmonth <- format(as.Date(train_sub$transactiondate), "%m")
+table(train_sub$txnmonth)
+barplot(table(train_sub$txnmonth))
+
+################ categorical var with output
+with(train_sub, plot(as.Date(transactiondate), logerror, pch = 20))
+#this is equivalent to
+plot(as.Date(train_sub$transactiondate), train_sub$logerror, pch = 20)
+
+# compare output between 2 months
+#without removing outliers, it is hard to observe from boxplot
+boxplot(subset(train_sub, txnmonth == '01')$logerror,
+        subset(train_sub, txnmonth == '06')$logerror)
+#removing outliers
+boxplot(subset(train_sub, txnmonth == '01' & abs(logerror) < 0.09)$logerror,
+        subset(train_sub, txnmonth == '06' & abs(logerror) < 0.09)$logerror)
+
+#a cleaner way to compare across all months using bwplot() from lattice library
+library(lattice)
+bwplot(logerror ~ txnmonth, data = train_sub)
+bwplot(logerror ~ txnmonth, data = subset(train_sub, abs(logerror) < 0.09))
+
+#we can also compute the median by month and visualize the points
+err.month <- by(train_sub, train_sub$txnmonth, function(x) {
+  return(median(x$logerror))})
+  
+plot(names(err.month), err.month, type = 'l')
+points(err.month, pch = 2, col ="blue")
+
+################################################################################################
+##################  constructing new features ##################################################
+################################################################################################
+
+############# taxvaluedollarcnt = structuretaxvaluedollarcnt + landtaxvaluedollarcnt
+#the result looks right, all the points are on abline
+with(train_sub, plot(structuretaxvaluedollarcnt + landtaxvaluedollarcnt, taxvaluedollarcnt))
+plot(train_sub$structuretaxvaluedollarcnt + train_sub$landtaxvaluedollarcnt, train_sub$taxvaluedollarcnt)
+abline(a = 0, b = 1, col = "red")
+
+#taxamount/taxvaluedollarcnt ~ tax rate, there are some outliers
+summary(with(train_sub, taxamount/taxvaluedollarcnt))
+
+#because the outliers, the following plot is less informative.
+with(train_sub, plot(taxamount/taxvaluedollarcnt, logerror))
+
+#after excluding the outlier, we can see whether tax rate is correlated with log error
+with(subset(train_sub,taxamount/taxvaluedollarcnt <= 0.1),
+     plot(taxamount/taxvaluedollarcnt, logerror))
+
+#calculate the correlation coefficient between output and tax rate
+with(subset(train_sub,taxamount/taxvaluedollarcnt <= 0.1), 
+     cor(logerror, taxamount/taxvaluedollarcnt, use = 'complete.obs')) #-0.04
+
+#calculate the correlation coefficient between output and tax amount
+with(subset(train_sub,taxamount/taxvaluedollarcnt <= 0.1), 
+     cor(logerror, taxamount, use = 'complete.obs')) # -0.004
+	 
+#calculate the correlation coefficient between output and taxable value	 
+with(subset(train_sub,taxamount/taxvaluedollarcnt <= 0.1), 
+     cor(logerror, taxvaluedollarcnt, use = 'complete.obs')) # 0.004
+
+	 
+####################calculatedfinishedsquarefeet/lotsizesquarefeet ~ % sqft house / land
+train_sub$living.per <- with(train_sub, calculatedfinishedsquarefeet/lotsizesquarefeet)
+summary(train_sub$living.per)
+
+with(subset(train_sub,living.per <= 1),
+     plot(living.per, logerror))
+
+with(train_sub, cor(logerror, calculatedfinishedsquarefeet, use = 'complete.obs'))	#0.03
+with(train_sub, cor(logerror, lotsizesquarefeet, use = 'complete.obs'))	#0.004
+with(train_sub, cor(logerror, calculatedfinishedsquarefeet/lotsizesquarefeet,
+                use = 'complete.obs'))		#0.003
+
+######## roomcnt >= sum of bathroomcnt and bedroomcnt
+# technically, all the points should be in the upper triage area
+with(train_sub, plot(bathroomcnt + bedroomcnt, roomcnt))
+abline(a = 0, b = 1)
+summary(with(train_sub, bathroomcnt + bedroomcnt - roomcnt))
+train_sub$room_wrong = train_sub$roomcnt < train_sub$bathroomcnt + train_sub$bedroomcnt
+bwplot(room_wrong ~ logerror, data = train_sub)
+bwplot(room_wrong ~ logerror, data = subset(train_sub, abs(logerror) < 0.09))
+
+#use t test to check whether "wrong room count" observations have higher absolute log error rate?
+with(train_sub, t.test(logerror ~ room_wrong))
+# conclusion: fail to reject mean log error is equal for wrong and correct room count
+
+				
+#################### fips
+table(train_sub$fips)
+
+by(train_sub, train_sub$fip, function(x) {
+  return(median(x$logerror))})
+
+bwplot(fips ~ logerror, data = train_sub)
+bwplot(fips ~ logerror, data = subset(train_sub, abs(logerror) < 0.09))
+
+summary(aov(logerror~fips, train_sub))
+#reject the null that mean log error is equal across three fips
+
+with(train_sub, t.test(logerror ~ (fips == '6037')))
+with(train_sub, t.test(logerror ~ (fips == '6059')))
+with(train_sub, t.test(logerror ~ (fips == '6111')))
+# t test results suggest that fip 6111 has higher error than the rest of population
+# maybe because too few data points
+# we should include boolean feature indicating whether fips = 6111.
+# Also if other feature having level with sparse data, we should expect large log.error.
+
+########################### regionidcity
+table(train_sub$regionidzip)
+# too many levels. 
+summary(lm(logerror ~ regionidzip, train_sub))
+
+#convert into numeric
+error.zip <- by(train_sub, train_sub$regionidzip, function(x) {
+  return(mean(x$logerror))
+})
+plot(density(error.zip))
+
+#now we have construct the new feature based on observed log error, the underlying belief is that
+#some zips will have higher error
+train_sub$error.zip <- error.zip[train_sub$regionidzip]
+train_sub$regionidzip.new <- ifelse(train_sub$error.zip < quantile(error.zip, 0.05), '1',
+                                ifelse(train_sub$error.zip < quantile(error.zip, 0.95), '2', '3'))
+summary(lm(logerror ~ regionidzip.new, train_sub))
+
+# check these extreme cases and find out they also have relative sparse data.
+error.zip[which(error.zip < -0.1)] # 96226
+error.zip[which(error.zip > 0.1)]
+dim(subset(train_sub, regionidzip == 96226))
+
+# Assumption: few number of houses for certain region id zip caused logerror large.
+# to verify:
+num.zip <- by(train_sub, train_sub$regionidzip, function(x) {
+  return(dim(x)[1])})
+train_sub$num.zip = num.zip[train_sub$regionidzip]
+with(train_sub, cor(logerror, num.zip, use = 'complete.obs'))
+with(train_sub, cor(abs(logerror), num.zip, use = 'complete.obs'))
+
+# in the future if there are new regionidzip appear, we can use sample size to estimate its relation with log error
+
+
+
+
+##simple linear regression 
+
+mod0 <- lm(logerror ~ taxvaluedollarcnt, data = train_imputed)
+with(train_imputed, plot(taxvaluedollarcnt, logerror))
+# check the result of model
+summary(mod0)
+# attention to the beta, p-value from t-test for beta, p-value from F test
+
+# diagnostics
+par(mfrow=c(2,2))
+plot(mod0)
+
+###### multiple linear regression ####
+# build a linear regression model with a group of features
+input <- c("taxvaluedollarcnt", "landtaxvaluedollarcnt", "calculatedfinishedsquarefeet", "yearbuilt")
+mod1 <- lm(logerror ~ ., data = train_imputed[, c("logerror", input)])
+summary(mod1)
+
+# coefficients are extremely small, because of the magnitude of features vs output, 
+# Standardize (will not change power, but easier to interpret effect)
+train_scaled <- data.frame(cbind(scale(train_imputed[, input]), "logerror" = train_imputed$logerror))
+mod2 <- lm(logerror ~ ., data = train_scaled)
+summary(mod2)
+
+#interpretation of dummy variables
+input2 <- c(input, "fireplaceflag")
+mod1_2 <- lm(logerror ~ ., data = train_imputed[, c("logerror", input)])
+summary(mod1_2)
+
+
+##multicollinearity
+library(corrplot)
+correlations <- cor(train_imputed[, input])
+corrplot(correlations, method = "square", type = 'upper')
+
+#from the correlation plot we see that landtaxvaluedollarcnt and taxvaluedollarcnt are highly correlated
+input3 <- input[input != "landtaxvaluedollarcnt"]
+mod3 <- lm(logerror ~ ., data = train_imputed[, c("logerror", input3)])
+summary(mod1)
+summary(mod3)
+#note that after removing landtaxvaluedollarcnt, the coefficient of taxvaluedollarcnt
+#(1) became significant
+#(2) flipped sign
+
+#stepwise regression
+input_max <- c(
+"bathroomcnt", "bedroomcnt", "calculatedbathnbr",
+"calculatedfinishedsquarefeet", "fullbathcnt", "roomcnt", 
+"yearbuilt", "structuretaxvaluedollarcnt", "taxvaluedollarcnt", 
+"landtaxvaluedollarcnt", "taxamount",
+"fips", "regionidcounty", "regionidzip", "hashottuborspa", 
+"fireplaceflag", "taxdelinquencyflag"
+)
+
+library(MASS)
+mod_max <- lm(logerror~., data = train_imputed[, c("logerror", input_max)])
+mod_step <- stepAIC(mod_max, direction="backward")
+mod_step$anova
+
+#stepAIC is a quick and dirty method
+#it takes into consideration of little domain knowledge 
+#and the order of variables largely affect the results
+#it always better to analyze the features one by one, and use domain knowledge to select features first
+
+#model evaluation
+mod_final <- lm(logerror ~ bedroomcnt + calculatedbathnbr + structuretaxvaluedollarcnt + 
+    taxvaluedollarcnt + fips, data = train_imputed)
+
+res <- mod_final$residual
+rmse <- sqrt(mean(res^2))
+rmse
+
+#cross validation
+#2/3 training and 1/3 for testing
+train_index <- sample(rownames(train_imputed), round(2*nrow(train_imputed)/3,0))
+test_index <- rownames(train_imputed)[!(rownames(train_imputed) %in% train_index)]
+length(train_index)
+length(test_index)
+
+mod_train <- lm(logerror ~ bedroomcnt + calculatedbathnbr + structuretaxvaluedollarcnt + 
+    taxvaluedollarcnt + fips, data = train_imputed[train_index, ])
+pred <- predict(mod_train, newdata = train_imputed[test_index, ])
+str(pred)
+
+pred_error <- train_imputed[test_index, "logerror"] - pred
+rmse_test <- sqrt(mean(pred_error^2))
+
+#compare rmse_test and rmse to check overfitting
+
+
+#compare two models
+mod_train2 <- lm(logerror ~ bedroomcnt + 
+    taxvaluedollarcnt + fips, data = train_imputed[train_index, ])
+pred2 <- predict(mod_train2, newdata = train_imputed[test_index, ])
+str(pred2)
+
+pred_error2 <- train_imputed[test_index, "logerror"] - pred2
+rmse_test2 <- sqrt(mean(pred_error2^2))
+rmse_test2
+rmse_test
